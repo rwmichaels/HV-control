@@ -1,0 +1,17 @@
+# README
+# 18-Jun-2014
+#
+In this directory:
+
+20140505_i2lchv_rPI-linux.c       - source file of old version of V1458 server from JG (wait for ATTN=0) (do not use)
+20140505_i2lchv_rPI-linux         - compiled of old version of V1458 server 
+20140618_i2lchv_rPI-linux.c       - source file of new version of V1458 server from JG (wait for ATTN=1)
+20140618_i2lchv_rPI-linux         - compiled of new version of V1458 server
+LecroyHV_Shim_telnet              - Perl Shim server with telnet connection from Java GUI (port=2001)
+LecroyHV_Shim_tcp                 - Perl Shim server with TCP/IP connection from Java GUI (port=2001)
+i2lchv_rPI-linux_emu.c            - source file of emulation of V1458 crate with 1 module
+i2lchv_rPI-linux_emu              - compiled of emulation of V1458 crate
+i2lchv_rPI-linux_emu_PC.c         - source file of emulation of V1458 crate with 1 module on PC
+
+
+

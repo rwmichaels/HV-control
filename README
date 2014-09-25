@@ -1,0 +1,91 @@
+HV software for rpi boards
+
+Below is information from Roman, who started this.
+However, this is just the minimal version, it has
+tcp_test and scripts directory.
+It is assumed that you already have Perl, Expect, etc.
+If not, you'll need to get those.
+
+Date: 01-May-2014 RP(romanip@jlab.org)
+
+List of installed packages for running of HV PERL Shim Server on Raspberry Pi board.
+Packages to install in directory:
+pkg_to_install/
+
+PERL:
+ 1. IO-Multiplex-1.13.tar.gz 
+ 2. Net-Server-2.007.tar.gz
+ 3. IO-Tty-1.10.tar.gz
+ 4. Expect-1.21.tar.gz
+
+ Commands to install:
+  tar xvfz *.tar.gz
+  cd <to_package_dir>
+  perl Makefile.PL
+  make
+  make test
+  sudo make install
+
+(optional)
+For gcc compiler (need to compile old 'i2lchv_linux_NNNN.c' with terminal interface);
+ 5. readline-6.3
+ 6. ncurses-5.9
+
+ Commands to install:
+  tar xvfz *.tar.gz
+  cd <to_package_dir>
+  configure		
+  make
+  sudo make install
+
+(optional)
+For system telnet client:
+ 7. telnet_0.17-36_armhf.deb
+ Commands to install:
+ sudo dpkg -i telnet_0.17-36_armhf.deb
+
+JAVA (optional: to run Java HV GUI on this board)
+(http://www.oracle.com/technetwork/java/javase/downloads/jdk8-arm-downloads-2187472.html)
+(http://www.raspihub.com/go/852f2b489f65630418c7c97b5dd64ee9f8b85ba8c0e6b6ba3a579d9902eb064d):
+ 1. Create a new directory where we will install the JDK files to: 
+  sudo mkdir -p -v /opt/java
+ 2. Unpack the Oracle JDK .gz file using this command:
+  sudo tar xvzf jdk-8-linux-arm-vfp-hflt.tar.gz -C /opt/java
+ 3. We need to let the system know there is a new JVM installed and where it is located: 
+  sudo update-alternatives --install "/usr/bin/java" "java" "/opt/java/jdk1.8.0/bin/java" 1
+  sudo update-alternatives --set java /opt/java/jdk1.8.0/bin/java
+
+Configure date/time client to synchronize local date/time from network time server (ntp)
+1. On server add next line to '/etc/ntp/config' file:
+     restrict 192.168.2.0 mask 255.255.255.0 nomodify notrap
+ Restart ntpd service:
+     /sbin/service ntpd restart
+2. On this board add next line to '/etc/ntp/config' file:
+     server 192.168.2.1
+ Reboot Raspberry Pi board:
+     sudo shutdown -r now
+	
+HV1458 server (for TCP or telnet connections uses port=24742):
+COMPILE source code:
+ gcc 20140618_i2lchv_rPI-linux.c -o 20140618_i2lchv_rPI-linux
+
+START '20140618_i2lchv_rPI-linux' program (HV1458 server):
+ sudo ./20140618_i2lchv_rPI-linux
+
+PERL Shim server (for TCP or telnet connections uses port=2001):
+START Perl Shim Server (with TCP/IP connection to HV1458 server and telnet connection to Java GUI):
+ cd tcp_test
+ sudo ./LecroyHV_Shim_telnet
+
+OR
+
+START Perl Shim Server (with TCP/IP connection to HV1458 server and TCP/IP connection to Java GUI):
+ cd tcp_test
+ sudo ./LecroyHV_Shim_tcp
+
+
+TODO
+1. Start/configure time client to synchronize local date/time from network time server.
+2. Change username/password for HV.
+3. There is HiPi Perl modules (http://raspberry.znix.com/) to control Raspberry GPIO pins.
+   May be someone can transform 'i2lchv_linux_NNNN.c' code to PERL and insert it to Shim Server.
