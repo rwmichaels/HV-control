@@ -1,0 +1,41 @@
+#!/bin/bash
+# to start the HV stuff in cron
+
+LECROYDIR="/home/pi/lecroy_servers"
+SCRIPTSDIR="/home/pi/scripts"
+SERVERNAME="20140803_i2lchv_rPI-linux"
+SHIMNAME="LecroyHV_shim-28Apr2021-epics"
+EPICSSERVER="st.cmd"
+EPICSDIR="/home/pi/epics/lecroy-epics/apps/iocBoot/iocrpi"
+PROCSERV="/home/pi/epics/extensions/bin/linux-arm/procServ"
+
+if(ps -efw|grep $SERVERNAME|grep -v grep>/dev/null); then
+    echo "Server already running"
+else
+    pushd $LECROYDIR
+    sudo ./$SERVERNAME &
+    echo "Starting $SERVERNAME"
+    popd
+    sleep 3
+fi
+
+if(ps -efw|grep $SHIMNAME|grep -v grep>/dev/null); then
+    echo "Shim already running"
+else
+    nohup $LECROYDIR/$SHIMNAME &
+    echo "Starting $SHIMNAME"
+    sleep 3
+fi
+
+if(ps -efw|grep $EPICSSERVER|grep -v grep>/dev/null); then
+    echo "Epics server $EPICSSERVER already running"
+else
+    echo "Configuring EPICS database"
+    $SCRIPTSDIR/configure_epics.py
+    echo "Starting Epics"
+    cd $EPICSDIR
+    $PROCSERV 20000 ./$EPICSSERVER
+fi
+
+
+

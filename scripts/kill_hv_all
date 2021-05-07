@@ -1,0 +1,12 @@
+#!/bin/bash
+#
+# Kill the Lecroy hardware interface server, the shim and the EPICS server.
+#
+# The cron job will restart them
+#
+
+sudo pkill i2lchv
+pkill LecroyHV_shim
+pkill procServ
+
+

@@ -1,11 +1,1 @@
-#!/bin/bash
-# Starts HV servers on Rasapberry Pi
-#
-# start HV1458 server (port=24742)
-sudo ~/tcp_test/20140803_i2lchv_rPI-linux &
-# wait while HV1458 initialized
-sleep 2
-# start Perl shim server (port=2001)
-~/tcp_test/LecroyHV_Shim_tcp2
-
-
+start_hv_cron_new
