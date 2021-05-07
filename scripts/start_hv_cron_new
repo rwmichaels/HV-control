@@ -4,6 +4,7 @@
 LECROYDIR="/home/pi/lecroy_servers"
 SCRIPTSDIR="/home/pi/scripts"
 SERVERNAME="20140803_i2lchv_rPI-linux"
+#SERVERNAME="i2lchv_rPI-linux_emu"
 SHIMNAME="LecroyHV_shim-28Apr2021-epics"
 EPICSSERVER="st.cmd"
 EPICSDIR="/home/pi/epics/lecroy-epics/apps/iocBoot/iocrpi"
@@ -27,15 +28,18 @@ else
     sleep 3
 fi
 
-if(ps -efw|grep $EPICSSERVER|grep -v grep>/dev/null); then
-    echo "Epics server $EPICSSERVER already running"
+if [ -f "$EPICSDIR/$EPICSSERVER" ]; then
+    if(ps -efw|grep $EPICSSERVER|grep -v grep>/dev/null); then
+	echo "Epics server $EPICSSERVER already running"
+    else
+	echo "Configuring EPICS database"
+	$SCRIPTSDIR/configure_epics.py
+	echo "Starting Epics"
+	cd $EPICSDIR
+	$PROCSERV 20000 ./$EPICSSERVER
+    fi
 else
-    echo "Configuring EPICS database"
-    $SCRIPTSDIR/configure_epics.py
-    echo "Starting Epics"
-    cd $EPICSDIR
-    $PROCSERV 20000 ./$EPICSSERVER
+    echo "EPICS server not found"
 fi
-
 
 
