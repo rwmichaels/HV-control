@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# to start the HV stuff in cron
+
+if(ps -ef|grep LecroyHV_Shim|grep -v grep>/dev/null); then
+  :
+echo "already running shim"
+else
+echo "running shim now ..."
+  /home/pi/scripts/start_hv>/dev/null&
+fi
+
+

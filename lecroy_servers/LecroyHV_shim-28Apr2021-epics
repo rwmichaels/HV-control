@@ -1,7 +1,19 @@
-#!/usr/bin/perl -I /perl 
+#!/usr/bin/perl
 package LecroyHV_Shim;  ## needed for Net::Server -- do not remove this line
 
 # Mod: 12-May-2014 RP: minor changes for use telnet connection in Expect().
+#                      Add cvalue to variable: $hvserver = "localhost:24742"; to use to connect with HV1458 server    
+# Mod: 05-Jun-2014 RP: changes for support TCP/IP protocol. In 'mux_input()' function add 'status code' (first 7 bytes)
+#                      and null termination symbol at the end of response for sending to Java GUI: 
+#       1               2 3 4 5                   7       8 ...            
+#  <space_or_C>   <5 ASCII digits status_code>  <space>  <message>  <\0>
+# if first symbol=space(0x20) then is one line in response,
+# if first symbol=C(0x43) then there is next line in response.
+# if status_code > 20 it is error message in response.
+#                      Multiline responses(SYSINFO,ENET,...) from HV crate are modified for TCP/IP protocol also.
+
+# Mod: 17-Apr-2021 BDS: Mods for compatibility with EPICS driver (which
+#                       expects original Lecroy interface.)
 
 # TODO:
 #   - Want to store current state information and send it on reload for each
@@ -62,7 +74,7 @@ package LecroyHV_Shim;  ## needed for Net::Server -- do not remove this line
 #     - If this is determined to be a  Bad Thing(TM), then just set the
 #       appropriate mux argument to limit to a single client connection.
 
-my $vers = "0.7";
+my $vers = "0.8-EPICS";
 
 use warnings;
 use strict;
@@ -75,7 +87,9 @@ use base qw(Net::Server::Multiplex);
 
 $ENV{PATH}="/bin:/usr/bin";
 
-my $hvserver = "192.168.2.2:24742";
+my $hvserver = "localhost:24742";
+#my $hvserver = "rpi1:24742";
+my $slotlistfile = "/tmp/LecroySlotList.txt";
 
 #$Expect::Debug = 1;
 $Expect::Multiline_Matching = 1;
@@ -86,10 +100,16 @@ $HVserverIO->raw_pty(1);
 my $HV_server_timeout = 5;
 
 my $L1450_READY_PROMPT = '%d\EDIT\1450>';
-#my $MF_READY_PROMPT    = 'lc232>';
+##my $MF_READY_PROMPT    = 'lc232>';
 my $MF_READY_PROMPT    = 'hvpi>';
 my $EOL = "\r\f";
+#my $EOL = "\0";
+
+my $LSLOT_OUTPUT_FORMAT="%sL%03d%s";   # Use 3 digits w/ leading zeros
+#my $LSLOT_OUTPUT_FORMAT="%sL%d%s";     # No leading zeros
+
 my $verbose = 1;   # = 1 print verbosely
+my $BROADCAST = 0; # = 1 then broadcast responses to all clients
 
 ## Property summary (psum) data are at the root of several costly commands that
 #  can pull data for all channels on all cards in the mainframe.  This allows the
@@ -106,15 +126,26 @@ my $GS_STALE_TIME = 10;
 #  to changes in any channels' MC or MV.  The java GUI has a hardcoded
 #  assumption that it will always be two words per logical unit so that's what
 #  I'll use.
+#  20Apr2021 (BDS): changed word definition so one field notes changes in
+#            measured values, and the second changes in demand values.
 #    - The minimum change field was to set some hysteresis zone.  In the long
 #      run, it would have to be copied into the logical unit map and vary for
 #      each card -- perhaps based on some analysis of the precision field
 #      reported by 'ATTR LX <prop>'
 #      --> Leave it it at zero for now.  It is not useful as is.
 my %LS_PROP_LIST = (
-  "MC" => {"idx" => 0, "min_change" => 0}, 
-  "MV" => {"idx" => 1, "min_change" => 0}, 
-  );
+  "MEASURED" => {
+    "idx" => 0,
+    "test_params" => {
+      "MC" => {"min_change" => 0},  # change in measured current value
+      "MV" => {"min_change" => 0},  # change in measured voltage value
+    },
+  },
+  "DEMAND" => {
+    "idx" => 1,
+    # "min_change" => 0,  # change in measured value  (not used...)
+  },
+);
 
 ## This is the word definition for the first word in the CONFIG response.
 #  The only bits that really matter (ie. that the java client looks at
@@ -149,6 +180,7 @@ sub default_values {
     maxclients => 2,
     port => 2001,
     log_level => 2,
+    broadcast => 0,
   }
 }
 
@@ -170,6 +202,10 @@ sub options {
 
   $prop->{'maxclients'} ||= 1;
   $template->{'maxclients'} = \$prop->{'maxclients'};
+
+  $prop->{'broadcast'} ||= 0;
+  $template->{'broadcast'} = \$prop->{'broadcast'};
+
 }
 
 #########################################################
@@ -189,6 +225,7 @@ sub usage($) {
 
     -h, --help        List this help message
 ##  -S, --server      Portserver address:port [$hvserver]
+    -B, --broadcast   Broadcast to all connected clients
     -M, --maxclients  Maximum number of clients that can connect [$prop->{maxclients}]
 
     See Net::Server(3pm) man page for additional paramaters.  A subset is presented below.
@@ -226,7 +263,7 @@ sub post_configure_hook {
   if( $prop->{"help"} ) {
     usage($self);
     exit 0;
-  }
+  } 
 }
 
 #########################################################
@@ -245,9 +282,19 @@ sub mux_input {
   my $peer = $self->{'peeraddr'};
   my $id   = $self->{'id'};
 
+  # Check what termination is used by client.
+  # Use that termination in response
+  my $eol = "\0";
+  if($$in_ref =~ /[\n]/) {
+      $eol = "\r\f";
+      # printlog ("Telnet");
+      #} else {
+      #   printlog ("TCP");
+  }
   # Process each line in the input, leaving partial lines
   # in the input buffer
-  while ($$in_ref =~ s/^([^\r]*?)[\r\n]+//) {
+  while ($$in_ref =~ s/^([^\r]*?)[\r\n\0]+//) {
+##  while ($$in_ref =~ s/^([^\r]*?)[\0]+//) {
     #next unless $1;
     my $message = $1;
     if ( $verbose == 1 ) {
@@ -259,13 +306,32 @@ sub mux_input {
       printlog ("[R] '$response'");
     }
 
+    #  Check number of lines in response. It seems that module does not have responses with more then one line.
+    #  Only HV crate have responses with few lines.
+    my $nr_of_lines = $response =~ tr/\n//;
+##    printlog ("NUM LINES: $nr_of_lines");
+
+   if ($response =~ m/\n/) {  
     ## Replace the newlines with the $EOL chars expected by the client
     ## Echo the client's commmand back too
-    $response =~ s/\n/$EOL/gm;
-    $self->broadcast($mux,"$message$EOL$response$EOL");
+    $response =~ s/\n/$eol/gm;
+   } else {
+      $response = $response . $eol;
+   }
 
     my $retcode = ($response =~ /^\s*$/) ? 127 : 1;
-    $self->broadcast($mux, sprintf("$L1450_READY_PROMPT", $retcode));
+
+    ## prepare status code for TCP/IP protocol
+    my $statuscode=sprintf(" %5d ", $retcode); 
+
+    if($nr_of_lines > 1) { 	
+	   $self->broadcast($mux,"$response$eol");
+     } else {
+           $self->broadcast($mux,"$statuscode$response");
+     }
+	
+##    $self->broadcast($mux,"$message$EOL$response$EOL");
+##    $self->broadcast($mux, sprintf("$L1450_READY_PROMPT", $retcode));
   }
 }
 
@@ -281,7 +347,7 @@ sub mux_close {
 
   ## If mux_connection has actually been run
   if (exists $self->{"id"}) {
-    $self->broadcast($mux,"LEFT: (#$self->{id}) from $peer");
+#    $self->broadcast($mux,"LEFT: (#$self->{id}) from $peer");
     printlog( "DEBUG: Client [$peer] (id $self->{id}) closed connection!");
   }
 }
@@ -339,13 +405,17 @@ sub broadcast {
   my $self = shift;
   my $mux  = shift;
   my $msg  = shift;
+  my $prop = $self->{"server"};
+  my $id   = $self->{'id'};
+
   #carp("broadcasting($msg)\n");
   foreach my $fh ($mux->handles) {
+    my $mux_id = $mux->{_fhs}->{$fh}->{object}->{id};
     # NOTE: All the client unique objects can be found at
     # $mux->{_fhs}->{$fh}->{object}
     # In this example, the {id} would be
     #   $mux->{_fhs}->{$fh}->{object}->{id}
-    print $fh $msg;
+    print $fh $msg if( $BROADCAST || ($mux_id == $id) );
   }
 }
 
@@ -462,7 +532,8 @@ sub mux_connection {
 
   #NOTE: This broadcast could collide with another client request, but maybe
   #       that's the penalty for allowing multilple clients...
-  $self->broadcast($mux, sprintf($L1450_READY_PROMPT, 1));
+
+##  $self->broadcast($mux, sprintf($L1450_READY_PROMPT, 1));
 }
 
 sub printlog {
@@ -556,45 +627,52 @@ sub HV1458_handler($) {
   }
 
   if($command eq "DUMP") {
-    $resp .=  "LOGICALUNITS: " . Dumper(@LOGICALUNIT);
-    $resp .=  "CRATE: " . Dumper(%CRATE);
+    $resp .=  "LOGICALUNITS: \n" . Dumper(@LOGICALUNIT) . "\n";
+    $resp .=  "CRATE: \n" . Dumper(%CRATE) . "\n";
     printlog($resp);
     return $resp;
   }
 
+  if($command eq "BROADCAST") {
+    $BROADCAST = $BROADCAST ? 0 : 1;
+    $resp = "Toggling broadcasting: " . $BROADCAST . "\n";
+    printlog($resp);
+    #return $resp;
+    return "";
+  }
 
   if($command eq "ENET") {
     # TODO: This should probably report the remote/telnet session information
-    my $resp = "ENET
-                IP 192.168.1.2
-                GATEWAY 192.168.1.1
-                MASK 255.255.255.0
-                PORT 1090
-                TELNET YES
-                FTP YES
-                BSD YES
-                HTTP NO
-                PHYS 000000000000
-                ";
+    my $resp = "C    1 ENET
+C    1 IP 192.168.1.2
+C    1 GATEWAY 192.168.1.1
+C    1 MASK 255.255.255.0
+C    1 PORT 1090
+C    1 TELNET YES
+C    1 FTP YES
+C    1 BSD YES
+C    1 HTTP NO
+*    1 PHYS 000000000000";
+
     $resp =~ s/^[ \t]*//gm;
     return $resp;
   }
 
   if($command eq "SYSINFO") {
-    my $resp = "SYSINFO
-                LeCroy Model:      1458
-                HW Revision:       SOFT
-                HW ECO:            0000
-                Test Date:     12/34/56
-                Tested by:        brads
-                FW Version:       $vers
-                FW Date:    Jan 01 1970
-                FW Time:       00:00:00
-                Mainframe S#:  DEADBEEF
-                Op Hours:             0
-                
-                LeCroy Research Systems
-    ";
+    my $resp = "C    1 SYSINFO
+C    1 LeCroy Model:      1458
+C    1 HW Revision:       SOFT
+C    1 HW ECO:            0000
+C    1 Test Date:     12/34/56
+C    1 Tested by:        brads
+C    1 FW Version:       $vers
+C    1 FW Date:    Jan 01 1970
+C    1 FW Time:       00:00:00
+C    1 Mainframe S#:  DEADBEEF
+C    1 Op Hours:             0
+C    1            
+*    1  LeCroy Research Systems";
+
     $resp =~ s/^[\n \t]*//gm;
     return $resp;
   }
@@ -611,6 +689,7 @@ sub HV1458_handler($) {
     my $lunit = shift(@cmd_arg);
     if( $lunit =~ /(\w?\d+)\.?(\d+)?/ ) {
       $lslot = $1;
+      $lslot = normalize_lslot($lslot);
       if(defined($2)) { $chan=$2; }
     } else {
       carp "'$command $lunit' has invalid format\n";
@@ -635,6 +714,7 @@ sub HV1458_handler($) {
   ## Return the property list associated with the card
   if($command eq "PROP") {
     $lslot = shift(@cmd_arg);   # card/slot index: ie 'L4'
+    $lslot = normalize_lslot($lslot);
 
     my $resp = properties($lslot);
     return $resp;
@@ -643,8 +723,10 @@ sub HV1458_handler($) {
   ## Return information about the card associated with the card
   if($command eq "ID") {
     $lslot = shift(@cmd_arg);   # card/slot index: ie 'L4'
+    $lslot = normalize_lslot($lslot);
 
     my $resp = id($lslot);
+##    $resp = normalize_lslot_output($resp);
     ## FIXME: HW board isn't returning a trailing 0 that the real mccoy returns so I add it here..
     return "$resp 0";
   }
@@ -652,8 +734,10 @@ sub HV1458_handler($) {
   ## Return a description of the associated property
   if($command eq "ATTR") {
     $lslot = shift(@cmd_arg);   # card/slot index: ie 'L4'
+    $lslot = normalize_lslot($lslot);
     $prop = shift(@cmd_arg);    # property: ie 'MC'
     $resp = attributes($lslot, $prop);
+##    $resp = normalize_lslot_output($resp);
     return $resp;
   }
 
@@ -663,6 +747,7 @@ sub HV1458_handler($) {
     my $lunit = shift(@cmd_arg);
     if( $lunit =~ /(\w?\d+)\.(\d+)/ ) {
       $lslot = $1;
+      $lslot = normalize_lslot($lslot);
       $chan = $2;
     } else {
       carp "'$command $lunit' has invalid format\n";
@@ -670,15 +755,18 @@ sub HV1458_handler($) {
     }
 
     $resp = dmp($lslot, $chan);
+#    $resp = normalize_lslot_output($resp);
     return $resp;
   }
 
   ## Recall the current value of an property for all channels
   if($command eq "RC") {
     $lslot = shift(@cmd_arg);   # card/slot index: ie 'L4'
+    $lslot = normalize_lslot($lslot);
     $prop = shift(@cmd_arg);   # property ie 'MC'
 
     $resp = recall($lslot, $prop);
+##    $resp = normalize_lslot_output($resp);
     return $resp;
   }
 
@@ -686,7 +774,9 @@ sub HV1458_handler($) {
   #  in the associated property.
   if($command eq "PSUM") {
     $lslot = shift(@cmd_arg);
+    $lslot = normalize_lslot($lslot);
     $resp = psum($lslot);
+##    $resp = normalize_lslot_output($resp);
     return $resp;
   }
 
@@ -709,6 +799,7 @@ sub HV1458_handler($) {
 
   if($command eq "PS") { # Property summary?
     $lslot = shift(@cmd_arg);   # slot index: ie 'L4'
+    $lslot = normalize_lslot($lslot);
     #  There is one word associated with each property for a module
     #  - a word gets incremented if there is any change to that property
     #  TODO: confirm this is working the way the client expects
@@ -716,7 +807,9 @@ sub HV1458_handler($) {
     #  LOG: Client to hatsv3:2005:PS L0
     #  PS L0 191F 0021 0001 0001 0001 0001 0001 00D8 0001 0001 0001
     $resp = psum($lslot);
+
     $resp =~ s/PSUM/PS/;
+##    $resp = normalize_lslot_output($resp);
     return $resp;
   }
 
@@ -780,6 +873,26 @@ sub HV1458_handler($) {
   }
 }
 
+sub normalize_lslot($) {
+  my $lslot=shift;
+
+  if($lslot =~ /L(\d+)/) {
+    $lslot=sprintf("L%d", $1);
+  } else {
+    printlog(sprintf("warning: badly formated lslot '$lslot'\n"));
+  }
+  return $lslot;
+}
+
+#sub normalize_lslot_output($) {
+#  my $cmd=shift;
+#
+#  if($cmd =~ /^(.*\s+)L(\d+)(\s+.*)$/) {
+#    $cmd=sprintf($LSLOT_OUTPUT_FORMAT, $1, $2, $3);
+#  }
+#  return $cmd;
+#}
+
 ## Report CONFIG state for crate
 sub config_status() {
   my $W0 = 0;
@@ -791,24 +904,34 @@ sub config_status() {
 }
 
 ## Report LS state for all cards in the crate
+# ie: LS A242 0007 A77F 0007 B611 0007 B685 0007 53A1 0007 0041 0007 85CD 0007 0006 0007 0003 0007 B6C3 0007 0014 0007 004C 0007 0003 0007 0003 0007 0003 0007 5B27 0007
 sub LS_status() {
   my $LS_resp = "LS";
 
+  my $meas_change   = 0;
+  my $demand_change = 0;
+
   foreach my $card ( @LOGICALUNIT ) {
-    my $slot =  $card->{"slot"};
+    my $slot =   $card->{"slot"};
     my $submod = $card->{"submod"};
     my $lslot =  $card->{"lslot"};
 
     $LS_resp .= " ";
+    my @old_LS = @{$card->{"LS"}};
     my $resp = update_LS_card($lslot);
     if ( $resp =~ /^\s*$/ ) {
-      $LS_resp .= join(" ", @{$card->{"LS"}});
+      $LS_resp .= join(" ", @{$card->{"LS"}} );
     } else {
       $LS_resp .= $resp;
     }
+
+    $meas_change++   if($old_LS[0] ne $card->{"LS"}[0]);
+    $demand_change++ if($old_LS[1] ne $card->{"LS"}[1]);
   }
 
-  update_GS_status("MEAS") if( $CRATE{"LS"} ne $LS_resp );
+  update_GS_status("MEAS")   if($meas_change);
+  update_GS_status("DEMAND") if($demand_change);
+
   $CRATE{"t_GS_meas"} = time();
   $CRATE{"LS"} = $LS_resp;
   return $LS_resp;
@@ -844,13 +967,14 @@ sub GS_status() {
   $CRATE{"GS"}{"MFACTV"}++;
 
   for my $key ("MEAS", "DEMAND", "MFCONF", "MFACTV", "HOSTACTV") {
-    $GS .= sprintf(" %04X", $CRATE{"GS"}{$key});
+    $GS .= sprintf(" %04X", $CRATE{"GS"}{$key}%65536);
   }
 
   return "GS$GS";
 }
 
-## Updates the 2 word 'LS' status for a card
+## Updates the 2 word 'LS' status for a card and returns them as 
+## space delimited hex string
 sub update_LS_card($) {
   my $lslot = shift;
   $lslot=get_logical_unit($lslot) if ($lslot =~ /^S\d+(S\d+)?$/i); 
@@ -879,7 +1003,11 @@ sub update_LS_card($) {
   $card->{"t_psum"} = $t_cur;
 
   my $resp;
-  for my $prop ( keys(%LS_PROP_LIST) ) {
+
+  ## Look for change in measured values
+  for my $prop ( keys( %{ $LS_PROP_LIST{"MEASURED"}{"test_params"} }) ) {
+    printlog("$old_state[$prop_idx->{$prop}]"."\n");
+    printlog("$new_state[$prop_idx->{$prop}]"."\n");
     if( $old_state[$prop_idx->{$prop}] ne $new_state[$prop_idx->{$prop}] ) {
       # poll card for prop in all channels
       my @old = @{$card->{$prop}};
@@ -889,16 +1017,24 @@ sub update_LS_card($) {
       $card->{$prop} = \@new;
       my $c=0;
       for(my $i=0; $i<$#old; $i++) {
-        $c++ if( abs($new[$i] - $old[$i]) >= $LS_PROP_LIST{$prop}{"min_change"} );
+        $c++ if( abs($new[$i] - $old[$i]) >= $LS_PROP_LIST{"MEASURED"}{"test_params"}{$prop}{"min_change"} );
       }
-      # Increment 'change' counter in LS list.  There seem to be two words
-      # per channel.  I'm making an educated guess that the first word is
-      # associated with MC, and the second MV.
-      my $idx = $LS_PROP_LIST{$prop}{"idx"};
-      $LS->[$idx] = sprintf("%04X", (hex($LS->[$idx])+$c)%65536);
+      # Increment the measured 'change' counter in LS list.
+      $LS->[0] = incr_hex($LS->[0], $c);
     }
   }
+  # Generate 'change' counter in LS list.  There are two words per card.
+  #   The first  word flags changes in measured values (current/voltage)
+  #   The second word flags changes in demand values
   return join(" ", @$LS);
+}
+
+## Increment a hex string (and return a wrapped 4 char hex string)
+sub incr_hex($$) {
+  my $val = shift;
+  my $c   = shift;
+
+  return sprintf("%04X", (hex($val)+$c)%65536);
 }
 
 ## Return a hash that maps array value to its array index
@@ -941,7 +1077,7 @@ sub get_logical_unit($) {
 sub num_only($) {
   my $tmp = shift;
   if($tmp =~ /\w?(\d+)/) {
-    return $1;
+    return $1+0;
   } else {
     printlog("'$tmp' has strange format");
     return $tmp;
@@ -1053,8 +1189,14 @@ sub load($$$@) {
     return "";
   }
 
+  ## Update 'DEMAND' change flag for this logical unit
+  my $LS = $card->{"LS"};
+  my $idx = $LS_PROP_LIST{DEMAND}{"idx"};
+  $LS->[$idx] = incr_hex($LS->[$idx], 1);
+
+  ## Update 'DEMAND' change flag in GS
   my ($lunit, $resp) = generic_cmd(sprintf("$cmd $attr $min_chan %s", join(" ", @args)), $lslot);
-  $CRATE{"GS"}{"DEMAND"}++;
+  update_GS_status("DEMAND");
 
   $lunit = sprintf("%s%s", $lunit, $chan eq "" ? "" : ".$chan");
   return sprintf("%s %s %s %s %s", $cmd, $lunit, $attr, $resp, join(" ", @args));
@@ -1152,8 +1294,11 @@ sub generic_cmd($$) {
   }
 
   $HVserverIO->clear_accum();
-  $HVserverIO->send( $remcmd );
-  ## The response string seems to contain a \006 (ACK) after the '($slot,$sub):'
+
+##  $HVserverIO->send( $remcmd ); # this is send only 80 characters? Why?
+    print $HVserverIO "$remcmd";  # this is work;
+
+## The response string seems to contain a \006 (ACK) after the '($slot,$sub):'
   #  bit.  It may also have an indeterminate number of \r's at the end.  This
   #  was fun to debug...
  # $HVserverIO->expect($HV_server_timeout,
@@ -1226,9 +1371,12 @@ sub init_LeCroy1458($) {
   );
   carp( $server->error() ) if( $server->error() );
 
+  open(my $SLFH, ">", $slotlistfile);
   for my $card ( @cardlist ) {
+      print $SLFH  "$card\n";
     LL_add_crate( $card );
   }
+  close($SLFH);
 
   ## poll the HV status (which updates the CONFIG flag)
   my $resp = poll_HV_status();
@@ -1259,7 +1407,7 @@ sub LL_add_crate($) {
   ## Initialize null lists for these properties here.  They will get filled on
   #  the first LS_status
   my $LS_prop_count=0;
-  for my $prop ( keys(%LS_PROP_LIST) ) {
+  for my $prop ( keys(%{$LS_PROP_LIST{MEASURED}{test_params}}) ) {
     if ( $verbose == 1 ) {
       printlog("prop: $prop\n");
     }
